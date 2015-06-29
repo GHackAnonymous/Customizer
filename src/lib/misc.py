@@ -111,7 +111,7 @@ def dir_current():
         cwd = '/'
     return cwd
 
-def system_command(command, shell=False, cwd=None, catch=False, env=None):
+def system_command(command, shell=False, cwd=None, env=None):
     if not cwd:
         cwd = dir_current()
     elif not os.path.isdir(cwd):
@@ -120,7 +120,7 @@ def system_command(command, shell=False, cwd=None, catch=False, env=None):
         env = os.environ
     if isinstance(command, str) and not shell:
         command = shlex.split(command)
-    if catch or CATCH:
+    if CATCH:
         pipe = subprocess.Popen(command, stderr=subprocess.PIPE, \
             shell=shell, cwd=cwd, env=env)
         pipe.wait()
@@ -130,23 +130,36 @@ def system_command(command, shell=False, cwd=None, catch=False, env=None):
     else:
         return subprocess.check_call(command, shell=shell, cwd=cwd, env=env)
 
-def chroot_exec(command, prepare=True, mount=True, output=False, xnest=False, shell=False):
+def chroot_exec(command, prepare=True, mount=True, output=False, xnest=False, shell=False, cwd=None):
     out = None
+    resolv = '%s/etc/resolv.conf' % config.FILESYSTEM_DIR
+    hosts = '%s/etc/hosts' % config.FILESYSTEM_DIR
     mount = whereis('mount')
     umount = whereis('umount')
     chroot = whereis('chroot')
-    chroot_command = [chroot, config.FILESYSTEM_DIR]
+    if isinstance(command, str):
+        chroot_command = '%s %s %s' % (chroot, config.FILESYSTEM_DIR, command)
+    else:
+        chroot_command = [chroot, config.FILESYSTEM_DIR]
+        chroot_command.extend(command)
     try:
         if prepare:
-            resolv = '%s/etc/resolv.conf' % config.FILESYSTEM_DIR
-            hosts = '%s/etc/hosts' % config.FILESYSTEM_DIR
-            if os.path.isfile('/etc/resolv.conf'):
+            if os.path.isfile('/etc/resolv.conf') and not os.path.islink(resolv):
+                 copy_file('/etc/resolv.conf', resolv)
+            elif os.path.islink(resolv):
+                # usually /run/resolvconf/resolv.conf
+                resolv = os.path.realpath(resolv)
+                rdir = os.path.dirname(resolv)
+                if not os.path.isdir(rdir):
+                    os.makedirs(rdir)
                 copy_file('/etc/resolv.conf', resolv)
             if os.path.isfile('/etc/hosts'):
+                if os.path.isfile(hosts):
+                    copy_file(hosts, '%s.backup' % hosts)
                 copy_file('/etc/hosts', hosts)
 
         if mount:
-            pseudofs = ['/proc', '/dev', '/sys', '/tmp', '/var/lib/dbus']
+            pseudofs = ['/proc', '/dev', '/dev/pts', '/dev/shm', '/sys', '/tmp', '/var/lib/dbus']
             if os.path.islink(config.FILESYSTEM_DIR + '/var/run'):
                 pseudofs.append('/run/dbus')
             else:
@@ -158,10 +171,7 @@ def chroot_exec(command, prepare=True, mount=True, output=False, xnest=False, sh
                 if not os.path.ismount(sdir):
                     if not os.path.isdir(sdir):
                         os.makedirs(sdir)
-                    if s == '/dev':
-                        system_command((mount, '--rbind', s, sdir))
-                    else:
-                        system_command((mount, '--bind', s, sdir))
+                    system_command((mount, '--bind', s, sdir))
 
 
         if prepare:
@@ -201,15 +211,16 @@ def chroot_exec(command, prepare=True, mount=True, output=False, xnest=False, sh
             environment['DEBCONF_NONINTERACTIVE_SEEN'] = 'true'
             environment['DEBCONF_NOWARNINGS'] = 'true'
 
-        if isinstance(command, str):
-            command = shlex.split(command)
-        chroot_command.extend(command)
         if output:
             out = get_output(chroot_command)
         else:
             system_command(chroot_command, shell=shell, \
-                env=environment)
+                env=environment, cwd=cwd)
     finally:
+        if prepare:
+            if os.path.isfile('%s.backup' % hosts):
+                copy_file('%s.backup' % hosts, hosts)
+                os.unlink('%s.backup' % hosts)
         if mount:
             for s in reversed(pseudofs):
                 sdir = config.FILESYSTEM_DIR + s
